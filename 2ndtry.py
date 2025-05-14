@@ -3,23 +3,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, classification_report, confusion_matrix, balanced_accuracy_score, f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split, GridSearchCV 
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, classification_report, confusion_matrix, balanced_accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.impute import KNNImputer
-from sklearn.calibration import calibration_curve, CalibratedClassifierCV
-from sklearn.ensemble import VotingClassifier
-from sklearn.feature_selection import RFE
-from imblearn.over_sampling import SMOTE
+from sklearn.impute import SimpleImputer
+from sklearn.calibration import calibration_curve
 import xgboost as xgb
-import lightgbm as lgb
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LinearRegression
 import shap
 from optbinning import OptimalBinning
-from fairlearn.metrics import demographic_parity_difference
-from sklearn.inspection import PartialDependenceDisplay
-import joblib
-import io
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -27,11 +19,11 @@ warnings.filterwarnings('ignore')
 np.random.seed(123)
 
 # Streamlit App Title
-st.title("Enhanced Credit Risk Management App")
+st.title("Final Credit Risk Management App with AI Enhancements")  # AI Addition: Updated title
 st.markdown("""
-This app predicts credit default risk using an optimized XGBoost model with advanced preprocessing, feature engineering, and ensemble techniques.
-It includes Expected Loss (EL) calculations, fairness analysis, and comprehensive visualizations.
-""")
+This app predicts credit default risk using an AI-optimized XGBoost model, addressing class imbalance, threshold optimization, and age dependency. 
+It includes Expected Loss (EL) calculations, advanced visualizations, AI-driven insights, and a natural language query interface.
+""")  # AI Addition: Updated description
 
 # 1. Load and Preprocess the UCI Credit Card Default Dataset
 @st.cache_data
@@ -45,46 +37,25 @@ def load_data():
 df = load_data()
 st.write("Dataset Loaded:", df.head())
 
-# Outlier capping
-def cap_outliers(df, column, lower_quantile=0.01, upper_quantile=0.99):
-    lower = df[column].quantile(lower_quantile)
-    upper = df[column].quantile(upper_quantile)
-    df[column] = df[column].clip(lower, upper)
-    return df
-
-# Feature Engineering
+# Feature Engineering: Bin Age into Groups and Add Interaction Term
 bins = [20, 30, 40, 50, 60, 100]
 labels = ['20-30', '30-40', '40-50', '50-60', '60+']
 df['AGE_GROUP'] = pd.cut(df['AGE'], bins=bins, labels=labels, include_lowest=True)
 df['AGE_PAY_0_INTERACTION'] = df['AGE'] * df['PAY_0']
-for i in range(1, 7):
-    df[f'PAY_TO_BILL_RATIO_{i}'] = df[f'PAY_AMT{i}'] / (df[f'BILL_AMT{i}'] + 1e-6)
-df['BILL_AMT_TREND'] = df['BILL_AMT1'] - df['BILL_AMT6']
-df['PAY_STATUS_TREND'] = df['PAY_0'] - df['PAY_6']
 
 # Define feature types
-numerical_cols = ['LIMIT_BAL', 'AGE', 'BILL_AMT1', 'BILL_AMT2', 'BILL_AMT3', 'BILL_AMT4',
-                  'BILL_AMT5', 'BILL_AMT6', 'PAY_AMT1', 'PAY_AMT2', 'PAY_AMT3',
-                  'PAY_AMT4', 'PAY_AMT5', 'PAY_AMT6', 'AGE_PAY_0_INTERACTION',
-                  'PAY_TO_BILL_RATIO_1', 'PAY_TO_BILL_RATIO_2', 'PAY_TO_BILL_RATIO_3',
-                  'PAY_TO_BILL_RATIO_4', 'PAY_TO_BILL_RATIO_5', 'PAY_TO_BILL_RATIO_6',
-                  'BILL_AMT_TREND', 'PAY_STATUS_TREND']
-categorical_cols = ['SEX', 'EDUCATION', 'MARRIAGE', 'PAY_0', 'PAY_2', 'PAY_3',
+numerical_cols = ['LIMIT_BAL', 'AGE', 'BILL_AMT1', 'BILL_AMT2', 'BILL_AMT3', 'BILL_AMT4', 
+                  'BILL_AMT5', 'BILL_AMT6', 'PAY_AMT1', 'PAY_AMT2', 'PAY_AMT3', 
+                  'PAY_AMT4', 'PAY_AMT5', 'PAY_AMT6', 'AGE_PAY_0_INTERACTION']
+categorical_cols = ['SEX', 'EDUCATION', 'MARRIAGE', 'PAY_0', 'PAY_2', 'PAY_3', 
                     'PAY_4', 'PAY_5', 'PAY_6', 'AGE_GROUP']
 
-# Handle outliers
-for col in numerical_cols:
-    df = cap_outliers(df, col)
+# Handle missing values
+num_imputer = SimpleImputer(strategy='median')
+df[numerical_cols] = num_imputer.fit_transform(df[numerical_cols])
 
-# Handle missing values with KNN imputation
-imputer = KNNImputer(n_neighbors=5)
-df[numerical_cols] = imputer.fit_transform(df[numerical_cols])
-
-# Impute only numerical categorical columns, excluding AGE_GROUP
-categorical_cols_to_impute = [col for col in categorical_cols if col != 'AGE_GROUP']
-if categorical_cols_to_impute:
-    cat_imputer = KNNImputer(n_neighbors=5)
-    df[categorical_cols_to_impute] = cat_imputer.fit_transform(df[categorical_cols_to_impute])
+cat_imputer = SimpleImputer(strategy='most_frequent')
+df[categorical_cols] = cat_imputer.fit_transform(df[categorical_cols])
 
 # Encode categorical variables
 df_encoded = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
@@ -94,9 +65,8 @@ scaler = StandardScaler()
 df_encoded[numerical_cols] = scaler.fit_transform(df_encoded[numerical_cols])
 
 # 2. WoE and IV Calculation
-@st.cache_data
 def calculate_woe_iv(df, feature, target):
-    optb = OptimalBinning(name=feature, dtype="numerical" if df[feature].dtype in ['int64', 'float64'] else "categorical", max_n_bins=10, min_bin_size=0.05)
+    optb = OptimalBinning(name=feature, dtype="numerical" if df[feature].dtype in ['int64', 'float64'] else "categorical")
     try:
         optb.fit(df[feature].values, df[target].values)
         binning_table = optb.binning_table.build()
@@ -116,8 +86,8 @@ for feature in features:
     iv_dict[feature] = iv
     optb_dict[feature] = optb
 
-# Feature selection with IV and RFE
-iv_threshold = 0.02
+# Lower IV threshold
+iv_threshold = 0.01
 selected_features = [f for f, iv in iv_dict.items() if iv > iv_threshold]
 if not selected_features:
     st.warning("No features passed IV threshold. Using all features.")
@@ -132,66 +102,52 @@ for feature in selected_features:
         df_woe = df_woe.drop(columns=[feature])
         selected_features.remove(feature)
 
-# Normalize WoE features
-woe_scaler = StandardScaler()
-df_woe[selectedwatermark] = False
-df_woe[selected_features] = woe_scaler.fit_transform(df_woe[selected_features])
-
 # 3. Train-Test Split
 X = df_woe[selected_features]
 y = df_woe['default']
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=123)
 
-# 4. Model Training
-# Handle class imbalance with SMOTE
-smote = SMOTE(random_state=123)
-X_train_bal, y_train_bal = smote.fit_resample(X_train, y_train)
-
-# Optimized XGBoost
-xgb_model = xgb.XGBClassifier(
-    max_depth=5, learning_rate=0.1, n_estimators=200,
-    subsample=0.8, colsample_bytree=0.8, random_state=123, eval_metric='logloss'
-)
-# Calibrate probabilities
-calibrated_xgb = CalibratedClassifierCV(xgb_model, method='sigmoid', cv=5)
-calibrated_xgb.fit(X_train_bal, y_train_bal)
-
-# Ensemble with LightGBM and Random Forest
-lgb_model = lgb.LGBMClassifier(random_state=123)
-rf_model = RandomForestClassifier(random_state=123)
-ensemble = VotingClassifier(
-    estimators=[('xgb', calibrated_xgb), ('lgb', lgb_model), ('rf', rf_model)],
-    voting='soft'
-)
-ensemble.fit(X_train_bal, y_train_bal)
-y_pred_prob = ensemble.predict_proba(X_test)[:, 1]
-
-# Save the trained model
-model_filename = "credit_risk_model.joblib"
-joblib.dump(ensemble, model_filename)
-
-# Cache SHAP explainer
+# 4. Model Training with AI-Optimized XGBoost
+# AI Addition: Function for hyperparameter tuning
 @st.cache_resource
-def get_explainer(model, X):
-    # Use KernelExplainer for ensemble compatibility
-    def model_predict(X):
-        return model.predict_proba(X)[:, 1]
-    return shap.KernelExplainer(model_predict, X)
-explainer = get_explainer(ensemble, X_train)
+def optimize_xgboost(X_train, y_train):
+    param_grid = {
+        'max_depth': [3, 5, 7],
+        'learning_rate': [0.01, 0.1],
+        'n_estimators': [100, 200]
+    }
+    xgb_model = xgb.XGBClassifier(scale_pos_weight=len(y_train[y_train == 0]) / len(y_train[y_train == 1]), 
+                                 random_state=123, eval_metric='logloss')
+    grid_search = GridSearchCV(xgb_model, param_grid, cv=3, scoring='f1', n_jobs=-1)
+    grid_search.fit(X_train, y_train)
+    st.write(f"**AI-Optimized XGBoost Parameters:** {grid_search.best_params_}")
+    return grid_search.best_estimator_
 
-# Option to load a saved model
-st.sidebar.header("Load Saved Model")
-uploaded_model = st.sidebar.file_uploader("Upload a saved model (.joblib)", type=["joblib"])
-if uploaded_model is not None:
-    ensemble = joblib.load(uploaded_model)
-    st.sidebar.success("Model loaded successfully!")
-    y_pred_prob = ensemble.predict_proba(X_test)[:, 1]
+# Calculate scale_pos_weight for class imbalance
+scale_pos_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1])
+model = optimize_xgboost(X_train, y_train)  # AI Addition: Use optimized model
+model.fit(X_train, y_train)
+y_pred_prob = model.predict_proba(X_test)[:, 1]
+
+# Linear Regression (Variant 1: WoE features)
+lin_reg1 = LinearRegression()
+lin_reg1.fit(X_train, y_train)
+y_pred_lin1 = lin_reg1.predict(X_test)
+y_pred_lin1 = np.clip(y_pred_lin1, 0, 1)
+
+# Linear Regression (Variant 2: Raw features)
+X_no_woe = df_encoded[selected_features]
+X_train_no_woe, X_test_no_woe = train_test_split(X_no_woe, test_size=0.3, random_state=123)
+lin_reg2 = LinearRegression()
+lin_reg2.fit(X_train_no_woe, y_train)
+y_pred_lin2 = lin_reg2.predict(X_test_no_woe)
+y_pred_lin2 = np.clip(y_pred_lin2, 0, 1)
 
 # 5. Prediction Interface with Threshold and EL
 st.header("Predict Default Risk")
-st.markdown("Enter client details to predict default probability and calculate Expected Loss (EL).")
+st.markdown("Enter client details to predict the probability of default and calculate Expected Loss (EL). Adjust the prediction threshold.")
 
-# Create input fields
+# Create input fields and threshold slider
 input_data = {}
 with st.form("prediction_form"):
     input_data['LIMIT_BAL'] = st.slider("Credit Limit (LIMIT_BAL)", 10000, 1000000, 50000)
@@ -199,17 +155,14 @@ with st.form("prediction_form"):
     input_data['PAY_0'] = st.selectbox("Payment Status (PAY_0)", [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8])
     input_data['BILL_AMT1'] = st.slider("Bill Amount (BILL_AMT1)", 0, 500000, 10000)
     input_data['PAY_AMT1'] = st.slider("Payment Amount (PAY_AMT1)", 0, 500000, 5000)
-    lgd = st.slider("Loss Given Default (LGD)", 0.0, 1.0, 0.8, 0.05)
-    ead = st.slider("Exposure at Default (EAD)", 10000, 1000000, input_data['LIMIT_BAL'])
     threshold = st.slider("Prediction Threshold", 0.0, 1.0, 0.5, 0.05)
     submitted = st.form_submit_button("Predict")
 
-# Process input data
+# Process input data, predict, and calculate EL
 if submitted:
     input_df = pd.DataFrame([input_data])
     input_df['AGE_GROUP'] = pd.cut(input_df['AGE'], bins=bins, labels=labels, include_lowest=True)
     input_df['AGE_PAY_0_INTERACTION'] = input_df['AGE'] * input_df['PAY_0']
-    input_df['PAY_TO_BILL_RATIO_1'] = input_df['PAY_AMT1'] / (input_df['BILL_AMT1'] + 1e-6)
     input_df = pd.get_dummies(input_df)
     for col in selected_features:
         if col not in input_df.columns:
@@ -221,241 +174,232 @@ if submitted:
     for feature in selected_features:
         if feature in optb_dict and optb_dict[feature] is not None:
             input_df[feature] = optb_dict[feature].transform(input_df[feature], metric="woe")
-    input_df = woe_scaler.transform(input_df)
-    prob = ensemble.predict_proba(input_df)[:, 1][0]
+    prob = model.predict_proba(input_df)[:, 1][0]
     pred = 1 if prob > threshold else 0
     st.write(f"**Predicted Default Probability (PD):** {prob:.2%}")
-    st.write(f"**Predicted Default (Threshold {threshold:.2f}):** {'Yes' if pred else 'No'}")
-    if pred:
+    st.write(f"**Predicted Default (Threshold {threshold:.2f}):** {pred}")
+    if prob > threshold:
         st.error("High risk of default!")
     else:
         st.success("Low risk of default.")
+    # Calculate Expected Loss (EL)
+    lgd = 0.8  # Assumption: 80% Loss Given Default
+    ead = input_data['LIMIT_BAL']  # Exposure at Default approximated by credit limit
     el = prob * lgd * ead
     st.write(f"**Expected Loss (EL):** ${el:,.2f}")
     st.markdown(f"**EL Breakdown:** PD = {prob:.2%}, LGD = {lgd:.0%}, EAD = ${ead:,}")
-    # SHAP explanation
-    shap_values = explainer.shap_values(input_df)
-    fig, ax = plt.subplots()
-    shap.bar_plot(shap_values[0], feature_names=selected_features, max_display=5)
-    st.pyplot(fig)
-    # Save SHAP plot
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight')
-    buf.seek(0)
-    st.download_button(
-        label="Download SHAP Plot",
-        data=buf,
-        file_name="shap_plot.png",
-        mime="image/png"
-    )
 
-# 6. Enhanced Model Performance and Visualizations
+# 6. AI-Powered Natural Language Query Interface
+st.header("Ask About the Model")  # AI Addition: New section
+query = st.text_input("Ask a question about the model or data (e.g., 'What is the most important feature?')")
+if query:
+    # Simulated AI response (rule-based for simplicity)
+    query = query.lower()
+    if "important feature" in query:
+        top_feature = pd.DataFrame({
+            'Feature': selected_features,
+            'SHAP Importance': np.abs(shap_values).mean(axis=0)
+        }).sort_values('SHAP Importance', ascending=False)['Feature'].iloc[0]
+        st.write(f"The most important feature is **{top_feature}** based on SHAP importance.")
+    elif "default rate" in query:
+        default_rate = df['default'].mean()
+        st.write(f"The dataset default rate is **{default_rate:.1%}**.")
+    elif "model performance" in query:
+        st.write(f"The model's balanced accuracy is **{balanced_accuracy_score(y_test, y_pred):.3f}** and F1-score is **{f1_score(y_test, y_pred):.3f}** at threshold {threshold:.2f}.")
+    else:
+        st.write("Sorry, I didn't understand the question. Try asking about the most important feature, default rate, or model performance.")
+
+# 7. Enhanced Model Performance and Visualizations
 st.header("Model Performance and Insights")
 
-# Optimal Threshold
-thresholds = np.arange(0.1, 0.9, 0.05)
-f1_scores = [f1_score(y_test, y_pred_prob > t) for t in thresholds]
-optimal_threshold = thresholds[np.argmax(f1_scores)]
-st.write(f"**Optimal Threshold (F1-Score):** {optimal_threshold:.2f}")
-y_pred = (y_pred_prob > optimal_threshold).astype(int)
-
-# Model Performance Metrics
-st.subheader("Ensemble Model Performance")
+# Model Performance Metrics with Adjustable Threshold
+st.subheader("AI-Optimized XGBoost Model Performance")  # AI Addition: Updated subheader
+threshold = st.slider("Select Threshold for Performance Metrics", 0.0, 1.0, 0.5, 0.05)
+y_pred = (y_pred_prob > threshold).astype(int)
 st.text("Classification Report:")
 st.text(classification_report(y_test, y_pred))
 balanced_acc = balanced_accuracy_score(y_test, y_pred)
 f1 = f1_score(y_test, y_pred)
 st.write(f"**Balanced Accuracy:** {balanced_acc:.3f}")
 st.write(f"**F1-Score:** {f1:.3f}")
-cv_scores = cross_val_score(ensemble, X, y, cv=5, scoring='balanced_accuracy')
-st.write(f"**Cross-Validated Balanced Accuracy:** {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
 
-# Download model
-st.download_button(
-    label="Download Trained Model",
-    data=open(model_filename, 'rb').read(),
-    file_name=model_filename,
-    mime='application/octet-stream'
-)
+# Correlation for Linear Models
+corr_lin1 = np.corrcoef(y_test, y_pred_lin1)[0, 1]
+corr_lin2 = np.corrcoef(y_test, y_pred_lin2)[0, 1]
+st.write("**Correlation with Actual Default:**")
+st.write(f"Linear Regression (WoE Features): {corr_lin1:.3f}")
+st.write(f"Linear Regression (Raw Features): {corr_lin2:.3f}")
 
 # Visualizations
 st.subheader("Visualizations")
-visualizations = {
-    "IV Bar Plot": st.checkbox("Show IV Bar Plot", value=True),
-    "ROC Curve": st.checkbox("Show ROC Curve", value=True),
-    "Precision-Recall Curve": st.checkbox("Show Precision-Recall Curve", value=True),
-    "SHAP Feature Importance": st.checkbox("Show SHAP Feature Importance", value=True),
-    "Confusion Matrix": st.checkbox("Show Confusion Matrix", value=True),
-    "Age vs. Default Rate": st.checkbox("Show Age vs. Default Rate", value=True),
-    "Calibration Plot": st.checkbox("Show Calibration Plot", value=True),
-    "Partial Dependence Plot": st.checkbox("Show Partial Dependence Plot", value=True)
-}
-
-# Function to save plot
-def save_plot(fig, filename):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight')
-    buf.seek(0)
-    return buf
 
 # IV Bar Plot
-if visualizations["IV Bar Plot"]:
-    fig, ax = plt.subplots()
-    iv_df = pd.DataFrame({'Feature': iv_dict.keys(), 'IV': iv_dict.values()})
-    iv_df = iv_df.sort_values('IV', ascending=False).head(10)
-    sns.barplot(x='IV', y='Feature', data=iv_df, ax=ax)
-    ax.set_title('Top 10 Features by Information Value (IV)')
-    st.pyplot(fig)
-    buf = save_plot(fig, "iv_bar_plot.png")
-    st.download_button(
-        label="Download IV Bar Plot",
-        data=buf,
-        file_name="iv_bar_plot.png",
-        mime="image/png"
-    )
+fig, ax = plt.subplots()
+iv_df = pd.DataFrame({'Feature': iv_dict.keys(), 'IV': iv_dict.values()})
+iv_df = iv_df.sort_values('IV', ascending=False).head(10)
+sns.barplot(x='IV', y='Feature', data=iv_df, ax=ax)
+ax.set_title('Top 10 Features by Information Value (IV)')
+st.pyplot(fig)
 
 # ROC Curve
-if visualizations["ROC Curve"]:
-    fig, ax = plt.subplots()
-    fpr, tpr, _ = roc_curve(y_test, y_pred_prob)
-    roc_auc = auc(fpr, tpr)
-    ax.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.2f})')
-    ax.plot([0, 1], [0, 1], 'k--')
-    ax.set_xlabel('False Positive Rate')
-    ax.set_ylabel('True Positive Rate')
-    ax.set_title('ROC Curve - Ensemble')
-    ax.legend(loc='lower right')
-    st.pyplot(fig)
-    buf = save_plot(fig, "roc_curve.png")
-    st.download_button(
-        label="Download ROC Curve",
-        data=buf,
-        file_name="roc_curve.png",
-        mime="image/png"
-    )
+fig, ax = plt.subplots()
+fpr, tpr, _ = roc_curve(y_test, y_pred_prob)
+roc_auc = auc(fpr, tpr)
+ax.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.2f})')
+ax.plot([0, 1], [0, 1], 'k--')
+ax.set_xlabel('False Positive Rate')
+ax.set_ylabel('True Positive Rate')
+ax.set_title('ROC Curve - AI-Optimized XGBoost')  # AI Addition: Updated title
+ax.legend(loc='lower right')
+st.pyplot(fig)
 
-# Precision-Recall Curve
-if visualizations["Precision-Recall Curve"]:
-    fig, ax = plt.subplots()
-    precision, recall, thresholds = precision_recall_curve(y_test, y_pred_prob)
-    ax.plot(recall, precision, label='Precision-Recall Curve')
-    ax.set_xlabel('Recall')
-    ax.set_ylabel('Precision')
-    ax.set_title('Precision-Recall Curve - Ensemble')
-    optimal_idx = np.argmax(2 * precision * recall / (precision + recall + 1e-10))
-    ax.plot(recall[optimal_idx], precision[optimal_idx], 'ro', label=f'Optimal Threshold = {thresholds[optimal_idx]:.2f}')
-    ax.legend()
-    st.pyplot(fig)
-    buf = save_plot(fig, "precision_recall_curve.png")
-    st.download_button(
-        label="Download Precision-Recall Curve",
-        data=buf,
-        file_name="precision_recall_curve.png",
-        mime="image/png"
-    )
+# Precision-Recall Curve with Optimal Threshold
+fig, ax = plt.subplots()
+precision, recall, thresholds = precision_recall_curve(y_test, y_pred_prob)
+ax.plot(recall, precision, label='Precision-Recall Curve')
+ax.set_xlabel('Recall')
+ax.set_ylabel('Precision')
+ax.set_title('Precision-Recall Curve - AI-Optimized XGBoost')  # AI Addition: Updated title
+optimal_idx = np.argmax(2 * precision * recall / (precision + recall + 1e-10))
+optimal_threshold = thresholds[optimal_idx]
+ax.plot(recall[optimal_idx], precision[optimal_idx], 'ro', label=f'Optimal Threshold = {optimal_threshold:.2f}')
+ax.legend()
+st.pyplot(fig)
 
-# SHAP Feature Importance
-if visualizations["SHAP Feature Importance"]:
-    fig, ax = plt.subplots()
-    shap_values = explainer.shap_values(X_test)
-    shap.summary_plot(shap_values, X_test, plot_type="bar", max_display=10, show=False)
-    plt.title('SHAP Feature Importance - Ensemble')
-    st.pyplot(fig)
-    buf = save_plot(fig, "shap_feature_importance.png")
-    st.download_button(
-        label="Download SHAP Feature Importance",
-        data=buf,
-        file_name="shap_feature_importance.png",
-        mime="image/png"
-    )
+# SHAP Feature Importance with AI-Generated Explanations
+fig, ax = plt.subplots()
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_test)
+shap.summary_plot(shap_values, X_test, plot_type="bar", max_display=10, show=False)
+plt.title('SHAP Feature Importance - AI-Optimized XGBoost')  # AI Addition: Updated title
+st.pyplot(fig)
+
+# AI Addition: AI-Generated SHAP Explanations
+st.subheader("AI-Generated Feature Importance Insights")
+shap_df = pd.DataFrame({
+    'Feature': selected_features,
+    'SHAP Importance': np.abs(shap_values).mean(axis=0)
+}).sort_values('SHAP Importance', ascending=False).head(3)
+for idx, row in shap_df.iterrows():
+    st.write(f"**{row['Feature']}**: This feature significantly influences default predictions. Higher values of {row['Feature']} are likely associated with {'increased' if row['SHAP Importance'] > 0 else 'decreased'} default risk, contributing {row['SHAP Importance']:.3f} to the model's decisions on average.")
+
+# WoE Distribution for Top Feature
+fig, ax = plt.subplots()
+top_feature = iv_df['Feature'].iloc[0]
+if optb_dict[top_feature] is not None:
+    binning_table = optb_dict[top_feature].binning_table.build()
+    sns.barplot(x='Bin', y='WoE', data=binning_table, ax=ax)
+    ax.set_title(f'WoE Distribution for {top_feature}')
+    ax.tick_params(axis='x', rotation=45)
+else:
+    ax.text(0.5, 0.5, 'WoE not available for top feature', ha='center')
+    ax.set_title(f'WoE Distribution for {top_feature}')
+st.pyplot(fig)
+
+# Distribution of Credit Limit
+fig, ax = plt.subplots()
+sns.histplot(data=df, x='LIMIT_BAL', hue='default', bins=30, ax=ax)
+ax.set_title('Distribution of Credit Limit by Default Status')
+ax.set_xlabel('Credit Limit (Standardized)')
+ax.set_ylabel('Count')
+st.pyplot(fig)
 
 # Confusion Matrix
-if visualizations["Confusion Matrix"]:
-    fig, ax = plt.subplots()
-    cm = confusion_matrix(y_test, y_pred)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-    ax.set_title('Confusion Matrix - Ensemble')
-    ax.set_xlabel('Predicted')
-    ax.set_ylabel('Actual')
-    st.pyplot(fig)
-    buf = save_plot(fig, "confusion_matrix.png")
-    st.download_button(
-        label="Download Confusion Matrix",
-        data=buf,
-        file_name="confusion_matrix.png",
-        mime="image/png"
-    )
+fig, ax = plt.subplots()
+cm = confusion_matrix(y_test, y_pred)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+ax.set_title('Confusion Matrix - AI-Optimized XGBoost')  # AI Addition: Updated title
+ax.set_xlabel('Predicted')
+ax.set_ylabel('Actual')
+st.pyplot(fig)
 
 # Age vs. Default Rate
-if visualizations["Age vs. Default Rate"]:
-    fig, ax = plt.subplots()
-    age_default_rate = df.groupby('AGE_GROUP')['default'].mean()
-    sns.barplot(x='AGE_GROUP', y='default', data=age_default_rate.reset_index(), ax=ax)
-    ax.set_title('Default Rate by Age Group')
-    ax.set_xlabel('Age Group')
-    ax.set_ylabel('Default Rate')
-    st.pyplot(fig)
-    buf = save_plot(fig, "age_default_rate.png")
-    st.download_button(
-        label="Download Age vs. Default Rate",
-        data=buf,
-        file_name="age_default_rate.png",
-        mime="image/png"
-    )
+fig, ax = plt.subplots()
+age_default_rate = df.groupby('AGE_GROUP')['default'].mean()
+sns.barplot(x='AGE_GROUP', y='default', data=age_default_rate.reset_index(), ax=ax)
+ax.set_title('Default Rate by Age Group')
+ax.set_xlabel('Age Group')
+ax.set_ylabel('Default Rate')
+st.pyplot(fig)
+
+# Age vs. Predicted PD (Scatter)
+fig, ax = plt.subplots()
+df_test = X_test.copy()
+df_test['default'] = y_test
+df_test['pred_prob'] = y_pred_prob
+df_test['AGE'] = df['AGE'].iloc[X_test.index]
+sns.scatterplot(x='AGE', y='pred_prob', hue='default', data=df_test, alpha=0.5, ax=ax)
+ax.set_title('Age vs. Predicted Probability of Default')
+ax.set_xlabel('Age')
+ax.set_ylabel('Predicted Probability of Default')
+st.pyplot(fig)
+
+# Age vs. Average Predicted PD
+fig, ax = plt.subplots()
+age_pred = df_test.groupby(df['AGE_GROUP'].iloc[X_test.index])['pred_prob'].mean().reset_index()
+sns.barplot(x='AGE_GROUP', y='pred_prob', data=age_pred, ax=ax)
+ax.set_title('Average Predicted PD by Age Group')
+ax.set_xlabel('Age Group')
+ax.set_ylabel('Average Predicted Probability of Default')
+st.pyplot(fig)
+
+# Feature Correlation Heatmap
+fig, ax = plt.subplots()
+corr = df[numerical_cols + ['default']].corr()
+sns.heatmap(corr, annot=False, cmap='coolwarm', ax=ax)
+ax.set_title('Feature Correlation Heatmap')
+st.pyplot(fig)
+
+# PD Distribution
+fig, ax = plt.subplots()
+sns.histplot(y_pred_prob, bins=30, kde=True, ax=ax)
+ax.set_title('Distribution of Predicted Default Probabilities')
+ax.set_xlabel('Predicted Probability of Default')
+ax.set_ylabel('Count')
+st.pyplot(fig)
 
 # Calibration Plot
-if visualizations["Calibration Plot"]:
-    fig, ax = plt.subplots()
-    prob_true, prob_pred = calibration_curve(y_test, y_pred_prob, n_bins=10)
-    ax.plot(prob_pred, prob_true, marker='o', label='Calibration Curve')
-    ax.plot([0, 1], [0, 1], 'k--', label='Perfectly Calibrated')
-    ax.set_xlabel('Mean Predicted Probability')
-    ax.set_ylabel('Fraction of Positives')
-    ax.set_title('Calibration Plot - Ensemble')
-    ax.legend()
-    st.pyplot(fig)
-    buf = save_plot(fig, "calibration_plot.png")
-    st.download_button(
-        label="Download Calibration Plot",
-        data=buf,
-        file_name="calibration_plot.png",
-        mime="image/png"
-    )
+fig, ax = plt.subplots()
+prob_true, prob_pred = calibration_curve(y_test, y_pred_prob, n_bins=10)
+ax.plot(prob_pred, prob_true, marker='o', label='Calibration Curve')
+ax.plot([0, 1], [0, 1], 'k--', label='Perfectly Calibrated')
+ax.set_xlabel('Mean Predicted Probability')
+ax.set_ylabel('Fraction of Positives')
+ax.set_title('Calibration Plot - AI-Optimized XGBoost')21  # AI Addition: Updated title
+ax.legend()
+st.pyplot(fig)
 
-# Partial Dependence Plot
-if visualizations["Partial Dependence Plot"]:
-    fig, ax = plt.subplots(figsize=(10, 6))
-    top_features = iv_df['Feature'].head(2).tolist()
-    # Get feature indices
-    feature_indices = [selected_features.index(f) for f in top_features if f in selected_features]
-    if feature_indices:
-        display = PartialDependenceDisplay.from_estimator(
-            ensemble, X_train, features=feature_indices, feature_names=selected_features, ax=ax
-        )
-        ax.set_title('Partial Dependence Plots')
-        st.pyplot(fig)
-        buf = save_plot(fig, "partial_dependence_plot.png")
-        st.download_button(
-            label="Download Partial Dependence Plot",
-            data=buf,
-            file_name="partial_dependence_plot.png",
-            mime="image/png"
-        )
-    else:
-        st.warning("Selected features for PDP not found in training data.")
+# Lift Chart
+fig, ax = plt.subplots()
+sorted_probs = np.sort(y_pred_prob)[::-1]
+sorted_indices = np.argsort(y_pred_prob)[::-1]
+sorted_labels = y_test.iloc[sorted_indices].values
+cumulative_positives = np.cumsum(sorted_labels)
+cumulative_population = np.arange(1, len(sorted_labels) + 1)
+baseline = cumulative_positives[-1] / len(sorted_labels) * cumulative_population
+lift = cumulative_positives / baseline
+ax.plot(cumulative_population / len(sorted_labels), lift, label='Lift Curve')
+ax.set_xlabel('Fraction of Population')
+ax.set_ylabel('Lift')
+ax.set_title('Lift Chart - AI-Optimized XGBoost')  # AI Addition: Updated title
+ax.legend()
+st.pyplot(fig)
 
-# 7. Enhanced Analysis
-st.subheader("Enhanced Analysis")
+# Enhanced Analysis
+st.subheader("AI-Enhanced Analysis")  # AI Addition: Updated subheader
 
 # Dataset Insights
 default_rate = df['default'].mean()
 st.write(f"**Dataset Default Rate:** {default_rate:.3f} ({default_rate*100:.1f}%)")
 st.write(f"**Number of Features Selected (IV > {iv_threshold}):** {len(selected_features)}")
+st.write(f"**Total Features Analyzed:** {len(features)}")
 
-# Fairness Analysis
-st.write("**Fairness Analysis:**")
-dp_diff = demographic_parity_difference(y_test, y_pred, sensitive_features=df['AGE_GROUP'].iloc[X_test.index])
-st.write(f"Demographic Parity Difference (Age Group): {dp_diff:.3f}")
+# Age Dependency Analysis
+st.write("**Age Dependency Analysis:**")
+age_default_rate_df = df.groupby('AGE_GROUP')['default'].mean().reset_index()
+st.write(age_default_rate_df.rename(columns={'default': 'Default Rate'}))
+st.write("**Average Predicted PD by Age Group:**")
+st.write(age_pred)
 
 # Feature Importance Tables
 st.write("**Top 5 Features by IV:**")
@@ -470,9 +414,9 @@ st.write(shap_df)
 
 # Confusion Matrix Insights
 st.write("**Confusion Matrix Insights:**")
-st.write(f"True Negatives: {cm[0,0]}")
-st.write(f"False Positives: {cm[0,1]}")
-st.write(f"False Negatives: {cm[1,0]}")
-st.write(f"True Positives: {cm[1,1]}")
-st.write(f"**Recall for Defaults:** {cm[1,1] / (cm[1,1] + cm[1,0]):.3f}")
+st.write(f"True Negatives (No Default, Predicted No Default): {cm[0,0]}")
+st.write(f"False Positives (No Default, Predicted Default): {cm[0,1]}")
+st.write(f"False Negatives (Default, Predicted No Default): {cm[1,0]}")
+st.write(f"True Positives (Default, Predicted Default): {cm[1,1]}")
+st.write(f"**Recall for Defaults (Sensitivity):** {cm[1,1] / (cm[1,1] + cm[1,0]):.3f}")
 st.write(f"**Precision for Defaults:** {cm[1,1] / (cm[1,1] + cm[0,1]):.3f}")
